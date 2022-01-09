@@ -1,0 +1,9 @@
+docker run -d -p 9000:9000 -p 9001:9001 -e "MINIO_ACCESS_KEY=admin" -e "MINIO_SECRET_KEY=svm" -v "/Dados/Docker/minio:/data" -name minio minio/minio server /data --console-address ":9001"
+
+
+#docker rename CONTAINER NEW_NAME
+
+
+
+
+docker run -d -p 8080:8080 -v "/Dados/Docker/airflow/dags:/opt/airflow/dags/" --entrypoint=/bin/bash --name airflow apache/airflow:2.1.1-python3.8 -c '(airflow db init && airflow users create --username admin --password svm --firstname Banco --lastname Lastname --role Admin --email marcos.goval@gmail.com); airflow webserver & airflow scheduler'

@@ -11,25 +11,34 @@ from datetime import timedelta, datetime
 from minio import Minio
 from io import BytesIO
 
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.cluster import KMeans, AgglomerativeClustering
+from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from imblearn.under_sampling import NearMiss
+import matplotlib.pyplot as plt
+import seaborn as sns
+
 #variaveis
-email = "rcelsoba@gmail.com"
+email = "..."
 
 dag = DAG(
-    dag_id="SVM_Squad",
-    description="DAG da Squad SVM para Clusterização",
+    dag_id="hello_world",
+    description="A primeira DAG de teste do airflow",
     start_date=airflow.utils.dates.days_ago(14),
     schedule_interval=None,
 )
 
+client = Minio(
+    "172.17.0.3:9000",
+    access_key="admin",
+    secret_key="min_svm12",
+    secure=False
+)
 
 def _ler_dados():
-    client = Minio(
-        "172.17.0.2:9000",
-        access_key="admin",
-        secret_key="min_svm12",
-        secure=False
-    )
-
     client.fget_object(
             "landing",
             "olist_customers_dataset.csv",
@@ -58,8 +67,6 @@ def _ler_dados():
     df1 = pd.merge(left=raw_orders_central, right=raw_costumer, on='customer_id', how='outer')
     price_freight = pd.merge(left=raw_price_freight, right=df1, on='order_id', how='left')
 
-
-    #dados = [price_freight, payment, client_review]
     Cliente = price_freight[['customer_unique_id', 'order_id']].groupby(['customer_unique_id']).agg(['nunique','count']).sort_values([('order_id', 'count'), ('order_id', 'nunique')], ascending=False)
 
     Cliente = Cliente['order_id']['nunique'].sort_values(ascending=False)
@@ -94,9 +101,8 @@ def _ler_dados():
     Cliente['retencao'] = Cliente['retencao'].dt.days
     Cliente['recencia'] = Cliente['recencia'].dt.days
     
-    #Cliente.to_csv('/opt/airflow/dags/Cliente.csv')
 
-    csv_bytes = Cliente.to_csv().encode('utf-8')
+    csv_bytes = Cliente.to_csv(index=None).encode('utf-8')
     csv_buffer = BytesIO(csv_bytes)
 
     client.put_object('processing',
@@ -104,6 +110,7 @@ def _ler_dados():
                         data=csv_buffer,
                         length=len(csv_bytes),
                         content_type='application/csv')
+
 
 ler_dados = PythonOperator(
     task_id="ler_dados",
@@ -113,7 +120,159 @@ ler_dados = PythonOperator(
     dag=dag
 )
 
+def _processar_modelo():
+    
+    client.fget_object(
+            "processing",
+            "cliente.csv",
+            "cliente",
+    )
+    Cliente = pd.read_csv("cliente")
 
+    Cliente['recencia'] = Cliente['recencia']  * -1
+
+    X = Cliente.drop(columns='cliente')
+
+    X.drop('receita_media_por_dia', axis=1, inplace=True)
+
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(X)
+    scaled_data = pd.DataFrame(scaled_data)
+    scaled_data.columns = X.columns
+    scaled_data.sort_values('receita_media_por_quantia', ascending=False)
+
+
+    km = KMeans(n_clusters=3, random_state=0).fit(scaled_data)
+    
+    clustered = pd.concat([Cliente['cliente'], scaled_data, pd.Series(km.predict(scaled_data))], axis=1, ignore_index=True)
+
+    cols = ['cliente', 'quantia_comprada', 'retencao', 'recencia', 'receita_media_por_quantia', 'grupo']
+    clustered.columns = cols
+
+    pca2 = PCA(n_components=2, random_state=0)
+    pca2 = pca2.fit_transform(scaled_data)
+
+    p2 = pd.DataFrame(pca2)
+
+    km2 = KMeans(n_clusters=3, random_state=0).fit(p2)
+
+
+    clustered2 = pd.concat([Cliente['cliente'], p2, pd.Series(km2.predict(p2))], axis=1, ignore_index=True)
+    cols = ['cliente', 'var_1', 'var_2', 'grupo']
+    clustered2.columns = cols
+
+    pca3 = PCA(n_components=3, random_state=0)
+    pca3 = pca3.fit_transform(scaled_data)
+
+    p3 = pd.DataFrame(pca3)
+
+    km3 = KMeans(n_clusters=3, random_state=0).fit(p3)
+
+    clustered3 = pd.concat([Cliente['cliente'], p3, pd.Series(km3.predict(p3))], axis=1, ignore_index=True)
+    cols = ['cliente', 'var_1', 'var_2', 'var_3', 'grupo']
+    clustered3.columns = cols
+
+    i = tuple(range(2,14))
+
+    k_elbow1 = [KMeans(n_clusters=clust, random_state=0).fit(scaled_data).inertia_ for clust in i]
+    k_elbow2 = [KMeans(n_clusters=clust, random_state=0).fit(p2).inertia_ for clust in i]
+    k_elbow3 = [KMeans(n_clusters=clust, random_state=0).fit(p3).inertia_ for clust in i]
+    
+
+
+    # Amostra de 20000 observações
+    np.random.seed(0)
+    sample = scaled_data.sample(20000)
+
+
+    # data, result, model = model_agg(scaled_data, 'ward')
+
+    model = AgglomerativeClustering(n_clusters=3, linkage='ward')
+    result = model.fit_predict(sample)
+
+    result = pd.Series(result)
+    final = pd.concat([sample.reset_index(drop=True), result], axis=1, ignore_index=True)
+    final.columns = list(X.columns) + ['grupo']
+
+
+    # model = AgglomerativeClustering(n_clusters=3, linkage='complete', affinity='euclidean')
+    # result2 = model.fit_predict(sample)
+
+    # result2 = pd.Series(result2)
+    # final2 = pd.concat([sample.reset_index(drop=True), result2], axis=1)
+    # final2.columns = list(X.columns) + ['grupo']
+    
+
+    # model = AgglomerativeClustering(n_clusters=3, linkage='complete', affinity='cosine')
+    # result3 = model.fit_predict(sample)
+
+    # result3 = pd.Series(result3)
+    # final3 = pd.concat([sample.reset_index(drop=True), result3], axis=1)
+    # final3.columns = list(X.columns) + ['grupo']
+
+
+    step = pd.concat([pd.Series(sample.index), final.grupo], ignore_index=True, axis=1).set_index(0)
+    rfr = RandomForestClassifier(n_jobs=-1, random_state=0, max_depth=3)
+
+    xtrain, xtest, ytrain, ytest = train_test_split(final.drop(columns='grupo'), final['grupo'], test_size=0.35, random_state=0, stratify=final['grupo'])
+    rfr.fit(xtrain, ytrain)
+    predicted_data = scaled_data.copy()
+    predicted_data = pd.concat([predicted_data, step], axis=1)
+    predicted_data.rename({1:'grupo'}, axis=1, inplace=True)
+    step = pd.Series(rfr.predict(predicted_data[predicted_data.grupo.isnull()].drop(columns='grupo')))
+    step.index = predicted_data[predicted_data.grupo.isnull()].index
+    dataFrame = pd.concat([predicted_data, step], axis=1)
+
+    dataFrame.rename({0:'grupo2'}, inplace=True, axis=1)
+    dataFrame.loc[dataFrame.grupo.isnull(), 'grupo'] = dataFrame.loc[dataFrame.grupo2.notnull(), 'grupo2']
+    dataFrame.drop('grupo2', axis=1, inplace=True)
+    dataFrame = dataFrame.astype({'grupo':int}).astype({'grupo':'category'})
+    
+    ## Tentando aplicar transformação para classes desbalanceadas
+    X, y = NearMiss().fit_resample(final.drop(columns='grupo'), final['grupo'])
+    rfr2 = RandomForestClassifier(n_jobs=-1, random_state=0, max_depth=3)
+
+    xtrain, xtest, ytrain, ytest = train_test_split(X, y, test_size=0.35, random_state=0, stratify=y)
+    rfr2.fit(xtrain, ytrain)
+    dataFrame2 = pd.concat([X, pd.Series(rfr2.predict(X))], axis=1, ignore_index=True)
+    dataFrame2.columns = dataFrame.columns
+    dataFrame['grupo'] = np.select(
+        [
+            dataFrame['grupo'] == 0,
+            dataFrame['grupo'] == 1,
+            dataFrame['grupo'] == 2,
+        ],
+        [
+            'ouro',
+            'bronze',
+            'prata'
+        ]
+    )
+    
+
+    Cliente_exp = pd.concat([Cliente['cliente'], dataFrame['grupo'].reset_index(drop=True)], axis=1, ignore_index=True)
+    Cliente_exp = pd.concat([Cliente_exp.reset_index(drop=True), Cliente.iloc[:, 1:]], axis=1, ignore_index=True)
+    Cliente_exp.columns = ['cliente', 'grupo', 'quantia_comprada', 'retencao', 'recencia',
+       'receita_media_por_quantia', 'receita_media_por_dia']
+
+    csv_bytes = Cliente_exp.to_csv(index=None).encode('utf-8')
+    csv_buffer = BytesIO(csv_bytes)
+    
+
+    client.put_object('curated',
+                       'clustering_client_data2.csv',
+                        data=csv_buffer,
+                        length=len(csv_bytes),
+                        content_type='application/csv')
+
+
+processar_modelo = PythonOperator(
+    task_id="processar_modelo",
+    email_on_failure=False,
+    email=email, 
+    python_callable=_processar_modelo,
+    dag=dag
+)
 
 
 task_echo_message = BashOperator(
@@ -122,4 +281,4 @@ task_echo_message = BashOperator(
     dag=dag,
 )
 
-ler_dados  >> task_echo_message
+ler_dados  >> processar_modelo >> task_echo_message
